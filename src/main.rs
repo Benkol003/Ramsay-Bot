@@ -15,6 +15,7 @@ use regex::Regex;
 
 type Value= Vec<String>;
 
+use serenity::builder::CreateMessage;
 use serenity::model::prelude::command::Command;
 use serenity::prelude::*;
 use serenity::async_trait;
@@ -25,6 +26,8 @@ use serenity::framework::standard::{StandardFramework, CommandResult};
 
 use songbird::input::Input;
 use songbird::{SerenityInit, input, ffmpeg};
+
+use serenity::utils::{read_image, MessageBuilder};
 
 struct Handler;
 
@@ -81,6 +84,7 @@ Use the bot prefix **gr!** with commands.
 For other insults, try:
     **doughnut**
     **donkey**
+    **spaghetti_code**
     ");
     message.channel_id.say(&context.http,response).await?;
     Ok(())
@@ -148,8 +152,22 @@ async fn insult(context: &Context, message: &Message) -> CommandResult{
     Ok(())
 }
 
+#[command]
+async fn spaghetti(context: &Context, message: &Message) -> CommandResult{
+    let mut response ="**".to_string();
+    response.push_str(&user_respond(&message).await);
+    response.push_str(" IS NOW A DISH LOLOLOL**");
+    let mut message_send=CreateMessage::default();
+
+    message.channel_id.send_message(&context.http,|m| {
+        m.content(&response).add_file("./spaghetti.jpg")
+    }
+    ).await?;
+    Ok(())
+}
+
 #[group]
-#[commands(doughnut,donkey,insult,help,join,leave)]
+#[commands(doughnut,donkey,insult,help,join,leave, spaghetti)]
 struct General;
 
 #[tokio::main]
