@@ -1,14 +1,19 @@
-use std::io::Read;
-use std::iter::FromIterator;
-use std::string;
-use std::vec;
+use std::{env, fs};
+use std::{
+    io::Read,
+    iter::FromIterator,
+    string,
+    vec
+};
 
 use rand::SeedableRng;
-use rand::seq::SliceRandom;
+use rand::seq::{SliceRandom, IteratorRandom};
 
 use lazy_static::lazy_static;
 
 use regex::Regex;
+
+type Value= Vec<String>;
 
 use serenity::model::prelude::command::Command;
 use serenity::prelude::*;
@@ -17,6 +22,10 @@ use serenity::model::channel::Message;
 use serenity::model::gateway::Ready;
 use serenity::framework::standard::macros::{command,group};
 use serenity::framework::standard::{StandardFramework, CommandResult};
+
+use songbird::input::Input;
+use songbird::{SerenityInit, input, ffmpeg};
+
 struct Handler;
 
 struct insultsKey;
@@ -62,18 +71,6 @@ async fn donkey(context: &Context, message: &Message) -> CommandResult{
 }
 
 #[command]
-async fn insult(context: &Context, message: &Message) -> CommandResult{
-    let mut response = user_respond(&message).await+" ";
-    let data=context.data.read().await;
-    let insults=data.get::<insultsKey>().expect("Access insults vector in shared context data.");
-    let mut rng=rand::rngs::StdRng::from_entropy();
-    let insult=insults.choose(&mut rng).expect("choose random insult.");
-    response.push_str(insult);
-    message.channel_id.say(&context.http,response).await?;
-    Ok(())
-}
-
-#[command]
 async fn help(context: &Context, message: &Message) -> CommandResult{
     let mut response = "<@".to_owned()+&message.author.id.to_string()+">";
     response.push_str(" look at you, you fucking doughnut.
@@ -89,29 +86,79 @@ For other insults, try:
     Ok(())
 }
 
-//unimplemented:
 #[command]
+#[only_in(guilds)]
 async fn join(context: &Context, message: &Message) -> CommandResult{
+    let guild_id=message.guild(&context.cache).unwrap().id;
+    let channel_id=message.guild(&context.cache).unwrap().voice_states.get(&message.author.id).and_then(|voice_state| voice_state.channel_id);
+    if channel_id==None{
+        message.reply(context,"You're not in a voice channel, you donkey.").await;
+        return Ok(())
+    }
+    let manager = songbird::get(context).await.expect("Initialised songbird voice client").clone();
+    manager.join(guild_id,channel_id.unwrap()).await;
     Ok(())
 }
 
 #[command]
+#[only_in(guilds)]
 async fn leave(context: &Context, message: &Message) -> CommandResult{
+    let guild_id = message.guild(&context.cache).unwrap().id;
+    let manager = songbird::get(context).await.expect("Initialised songbird voice client.").clone();
+    let handler = manager.get(guild_id).is_some();
+    if handler{
+        if let Err(err) = manager.remove(guild_id).await{
+            message.reply(context, format!("Fucks sake, i cant leave: {:?}",err)).await;
+        }
+    }else{
+        message.reply(context,"You doughnut, i'm not even here.").await;
+    }
+    Ok(())
+}
+
+#[command]
+async fn insult(context: &Context, message: &Message) -> CommandResult{
+
+    let AUDIO_FOLDER = "audio_clips\\";
+
+
+    let guild_id = message.guild(&context.cache).unwrap().id;
+    let manager = songbird::get(context).await.expect("Initialised songbird voice client.").clone();
+    let mut rng=rand::rngs::StdRng::from_entropy();
+    if let Some(handler) = manager.get(guild_id){
+
+        let mut audio_folder_path = env::current_dir().unwrap();
+        println!("{:?}",env::current_dir().unwrap());
+        audio_folder_path.push(AUDIO_FOLDER);
+        println!("EXE Path: {}",audio_folder_path.to_str().unwrap());
+        let src_path = fs::read_dir(audio_folder_path).unwrap().choose(&mut rng).unwrap().unwrap().path();
+        println!("audio src: {:?}",src_path.to_str());
+        let mut audio_src= ffmpeg(src_path).await.expect("open file as audio.");
+
+        let track_handler = handler.lock().await.play_only_source(audio_src);
+    } else{
+        let mut response = user_respond(&message).await+" ";
+        let data=context.data.read().await;
+        let insults=data.get::<insultsKey>().expect("Access insults vector in shared context data.");
+        let insult=insults.choose(&mut rng).expect("choose random insult.");
+        response.push_str(insult);
+        message.channel_id.say(&context.http,response).await?;
+    }
+
     Ok(())
 }
 
 #[group]
-#[commands(doughnut,donkey,insult,help)]
+#[commands(doughnut,donkey,insult,help,join,leave)]
 struct General;
 
 #[tokio::main]
 async fn main(){
-    //TODO remove unwrap, (panics)
     dotenv::dotenv().expect("Failed to load .env file.");
     let discord_token=dotenv::var("DISCORD_TOKEN").expect("Failed to get discord token from env.");
     println!("Discord Token: {}",discord_token);
 
-    let insults_fpath="insults.txt";
+    let insults_fpath=".\\insults.txt";
 
     
 
@@ -126,9 +173,9 @@ async fn main(){
         insults.push(i.to_string());
     }
 
-    let intents=GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
+    let intents= GatewayIntents::non_privileged() | GatewayIntents::GUILD_MESSAGES | GatewayIntents::MESSAGE_CONTENT;
     let framework=StandardFramework::new().configure(|c| c.prefix("gr!")).group(&GENERAL_GROUP);
-    let mut client=Client::builder(&discord_token,intents).event_handler(Handler).framework(framework).
+    let mut client=Client::builder(&discord_token,intents).event_handler(Handler).framework(framework).register_songbird().
     await.expect("Error creating client.");
 
     {
@@ -136,7 +183,12 @@ async fn main(){
         data.insert::<insultsKey>(insults);
     }
 
-    if let Err(why)=client.start().await{
-        println!("Client error: {}",why);
-    }  
+
+    tokio::spawn(async move{
+        let _ = client.start().await.map_err(|why| println!("Client error: {}",why));
+    });
+    println!("ok");
+    tokio::signal::ctrl_c().await;
+    println!("Shutdown signal recieved.");
+    //TODO make leave on shutdown
 }
